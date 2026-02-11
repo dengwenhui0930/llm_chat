@@ -1,5 +1,6 @@
 from app.tools.get_weather import get_weather
 from app.tools.calculator import calculator
+from app.tools.web_search import web_search
 
 # OpenAI-compatible tool definitions (used by OpenRouter)
 TOOL_DEFINITIONS_OPENAI = [
@@ -37,6 +38,27 @@ TOOL_DEFINITIONS_OPENAI = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "联网搜索，获取实时网络信息。当用户询问最新资讯、新闻、实时数据等需要联网的问题时使用",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词，例如：最新科技新闻、Python 3.12新特性",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "返回结果数量，默认5条",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 # Keep the old name for backward compatibility in /tools route
@@ -45,6 +67,7 @@ TOOL_DEFINITIONS = TOOL_DEFINITIONS_OPENAI
 _DISPATCH = {
     "get_weather": get_weather,
     "calculator": calculator,
+    "web_search": web_search,
 }
 
 

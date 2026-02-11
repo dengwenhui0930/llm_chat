@@ -5,7 +5,9 @@ from fastapi.responses import StreamingResponse
 
 from app.models.chat import ChatRequest
 from app.services.chat_service import ChatService, _sessions
-from app.services.knowledge_service import ALLOWED_EXTENSIONS, split_chunks, store_chunks
+from pydantic import BaseModel
+
+from app.services.knowledge_service import ALLOWED_EXTENSIONS, delete_file, extract_docx_text, list_files, split_chunks, store_chunks
 from app.services.prompt_manager import get_current_version, list_versions, load_template
 from app.tools.tool_registry import TOOL_DEFINITIONS
 
@@ -77,8 +79,12 @@ async def list_prompts():
 async def upload_knowledge(file: UploadFile):
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Only .txt and .md are allowed")
-    content = (await file.read()).decode("utf-8")
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Allowed: .txt, .md, .docx")
+    raw = await file.read()
+    if ext == ".docx":
+        content = extract_docx_text(raw)
+    else:
+        content = raw.decode("utf-8")
     chunks = split_chunks(content)
     store_chunks(file.filename, chunks)
     return {"filename": file.filename, "chunks": len(chunks), "status": "success"}
@@ -89,3 +95,49 @@ async def delete_session(session_id: str):
     if session_id not in _sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     del _sessions[session_id]
+
+
+# ---------- Knowledge Files ----------
+
+@router.get("/knowledge/files")
+async def list_knowledge_files():
+    return {"files": list_files()}
+
+
+@router.delete("/knowledge/files/{filename}")
+async def delete_knowledge_file(filename: str):
+    if not delete_file(filename):
+        raise HTTPException(status_code=404, detail="File not found")
+    return {"status": "deleted", "filename": filename}
+
+
+# ---------- Settings ----------
+
+class SettingsUpdate(BaseModel):
+    chat_model: str | None = None
+    prompt_version: str | None = None
+
+@router.get("/settings")
+async def get_settings():
+    from app.services.chat_service import _MODEL
+    return {
+        "chat_model": _MODEL,
+        "prompt_version": get_current_version(),
+        "available_prompt_versions": list_versions(),
+    }
+
+
+@router.put("/settings")
+async def update_settings(body: SettingsUpdate):
+    import app.services.chat_service as cs
+    updated = {}
+    if body.chat_model is not None:
+        cs._MODEL = body.chat_model
+        updated["chat_model"] = body.chat_model
+    if body.prompt_version is not None:
+        versions = list_versions()
+        if body.prompt_version not in versions:
+            raise HTTPException(status_code=400, detail=f"Unknown prompt version: {body.prompt_version}")
+        os.environ["PROMPT_VERSION"] = body.prompt_version
+        updated["prompt_version"] = body.prompt_version
+    return {"status": "updated", **updated}
