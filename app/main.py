@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-import anthropic
+from openai import AuthenticationError, APITimeoutError, APIError
 
 from app.routes.chat import router as chat_router
 
@@ -20,27 +20,27 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(anthropic.AuthenticationError)
-async def anthropic_auth_error_handler(request: Request, exc: anthropic.AuthenticationError):
+@app.exception_handler(AuthenticationError)
+async def auth_error_handler(request: Request, exc: AuthenticationError):
     return JSONResponse(
         status_code=500,
-        content={"detail": "Anthropic API Key is not configured or invalid"},
+        content={"detail": "API Key is not configured or invalid"},
     )
 
 
-@app.exception_handler(anthropic.APITimeoutError)
-async def anthropic_timeout_handler(request: Request, exc: anthropic.APITimeoutError):
+@app.exception_handler(APITimeoutError)
+async def timeout_handler(request: Request, exc: APITimeoutError):
     return JSONResponse(
         status_code=502,
-        content={"detail": f"Claude API error: {exc}"},
+        content={"detail": f"LLM API error: {exc}"},
     )
 
 
-@app.exception_handler(anthropic.APIError)
-async def anthropic_api_error_handler(request: Request, exc: anthropic.APIError):
+@app.exception_handler(APIError)
+async def api_error_handler(request: Request, exc: APIError):
     return JSONResponse(
         status_code=502,
-        content={"detail": f"Claude API error: {exc}"},
+        content={"detail": f"LLM API error: {exc}"},
     )
 
 

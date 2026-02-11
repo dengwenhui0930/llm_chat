@@ -25,7 +25,7 @@ async def health():
 @router.post("/chat")
 async def chat(request: ChatRequest):
     if _service is None:
-        raise HTTPException(status_code=500, detail="Anthropic API Key is not configured or invalid")
+        raise HTTPException(status_code=500, detail="API Key is not configured or invalid")
 
     return StreamingResponse(
         _service.chat_stream(
@@ -48,15 +48,16 @@ async def get_session_history(session_id: str):
 async def list_tools():
     tools = []
     for defn in TOOL_DEFINITIONS:
-        schema = defn["input_schema"]
+        func = defn["function"]
+        schema = func["parameters"]
         required = set(schema.get("required", []))
         parameters = {
             name: {"type": prop["type"], "required": name in required}
             for name, prop in schema["properties"].items()
         }
         tools.append({
-            "name": defn["name"],
-            "description": defn["description"],
+            "name": func["name"],
+            "description": func["description"],
             "parameters": parameters,
         })
     return {"tools": tools}

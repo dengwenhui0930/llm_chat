@@ -2,13 +2,18 @@ import json
 import os
 from collections.abc import AsyncGenerator
 
-import anthropic
+from openai import (
+    AsyncOpenAI,
+    AuthenticationError,
+    APITimeoutError,
+    APIError,
+)
 
 from app.services.prompt_manager import load_template, render_template
 from app.services.retriever import retrieve
-from app.tools.tool_registry import TOOL_DEFINITIONS, dispatch
+from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI, dispatch
 
-_MODEL = "claude-sonnet-4-20250514"
+_MODEL = os.environ.get("CHAT_MODEL", "anthropic/claude-sonnet-4-20250514")
 _MAX_TOKENS = 4096
 
 # In-memory session storage: session_id -> list of messages
@@ -17,10 +22,11 @@ _sessions: dict[str, list[dict]] = {}
 
 class ChatService:
     def __init__(self) -> None:
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable is required")
-        self.client = anthropic.AsyncAnthropic(api_key=api_key)
+            raise ValueError("OPENROUTER_API_KEY environment variable is required")
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     def _build_system_prompt(self, message: str, use_knowledge: bool) -> str:
         variables: dict[str, str] = {}
@@ -31,7 +37,7 @@ class ChatService:
                 references = "\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(chunks))
                 variables["knowledge_context"] = references
 
-        tool_names = [t["name"] for t in TOOL_DEFINITIONS]
+        tool_names = [t["function"]["name"] for t in TOOL_DEFINITIONS_OPENAI]
         if tool_names:
             variables["tool_list"] = ", ".join(tool_names)
 
@@ -48,54 +54,75 @@ class ChatService:
             _sessions[session_id] = []
         history = _sessions[session_id]
 
-        system = self._build_system_prompt(message, use_knowledge)
+        system_prompt = self._build_system_prompt(message, use_knowledge)
 
         history.append({"role": "user", "content": message})
 
+        # Build messages list with system prompt at the front
+        def _build_messages():
+            return [{"role": "system", "content": system_prompt}] + history
+
         try:
-            # Tool use loop: non-streaming calls until Claude stops calling tools
+            # Tool use loop: non-streaming calls until model stops calling tools
             while True:
-                response = await self.client.messages.create(
+                response = await self.client.chat.completions.create(
                     model=_MODEL,
                     max_tokens=_MAX_TOKENS,
-                    system=system,
-                    messages=history,
-                    tools=TOOL_DEFINITIONS,
+                    messages=_build_messages(),
+                    tools=TOOL_DEFINITIONS_OPENAI,
                 )
 
-                if response.stop_reason != "tool_use":
+                choice = response.choices[0]
+                assistant_msg = choice.message
+
+                if not assistant_msg.tool_calls:
                     break
 
-                # Append the full assistant message (may contain text + tool_use blocks)
-                history.append({"role": "assistant", "content": _serialize_content(response.content)})
+                # Append assistant message with tool_calls to history
+                history.append({
+                    "role": "assistant",
+                    "content": assistant_msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in assistant_msg.tool_calls
+                    ],
+                })
 
-                # Execute each tool and build tool_result blocks
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        result = dispatch(block.name, block.input)
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result, ensure_ascii=False),
-                        })
+                # Execute each tool and append tool results
+                for tc in assistant_msg.tool_calls:
+                    tool_input = json.loads(tc.function.arguments)
+                    result = dispatch(tc.function.name, tool_input)
+                    history.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
 
-                history.append({"role": "user", "content": tool_results})
-
-            # Final streaming call — Claude is ready to give a text answer
+            # Final streaming call
             full_response = ""
-            async with self.client.messages.stream(
+            stream = await self.client.chat.completions.create(
                 model=_MODEL,
                 max_tokens=_MAX_TOKENS,
-                system=system,
-                messages=history,
-                tools=TOOL_DEFINITIONS,
-            ) as stream:
-                async for text in stream.text_stream:
-                    full_response += text
-                    yield f"data: {json.dumps({'type': 'content_block_delta', 'text': text}, ensure_ascii=False)}\n\n"
+                messages=_build_messages(),
+                tools=TOOL_DEFINITIONS_OPENAI,
+                stream=True,
+            )
 
-        except (anthropic.AuthenticationError, anthropic.APITimeoutError, anthropic.APIError):
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    full_response += delta.content
+                    yield f"data: {json.dumps({'type': 'content_block_delta', 'text': delta.content}, ensure_ascii=False)}\n\n"
+
+        except (AuthenticationError, APITimeoutError, APIError):
+            # Roll back all messages added in this turn
             while history and history[-1].get("role") != "user":
                 history.pop()
             if history:
@@ -104,19 +131,3 @@ class ChatService:
 
         history.append({"role": "assistant", "content": full_response})
         yield f"data: {json.dumps({'type': 'message_stop'})}\n\n"
-
-
-def _serialize_content(content_blocks) -> list[dict]:
-    """Convert SDK content blocks to plain dicts for session history."""
-    result = []
-    for block in content_blocks:
-        if block.type == "text":
-            result.append({"type": "text", "text": block.text})
-        elif block.type == "tool_use":
-            result.append({
-                "type": "tool_use",
-                "id": block.id,
-                "name": block.name,
-                "input": block.input,
-            })
-    return result

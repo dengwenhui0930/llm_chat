@@ -1,6 +1,6 @@
 from app.tools.get_weather import get_weather
 from app.tools.calculator import calculator
-from app.tools.tool_registry import TOOL_DEFINITIONS, dispatch
+from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI, dispatch
 
 
 class TestGetWeather:
@@ -44,11 +44,13 @@ class TestCalculator:
 
 class TestToolRegistry:
     def test_definitions_format(self):
-        for defn in TOOL_DEFINITIONS:
-            assert "name" in defn
-            assert "description" in defn
-            assert "input_schema" in defn
-            schema = defn["input_schema"]
+        for defn in TOOL_DEFINITIONS_OPENAI:
+            assert defn["type"] == "function"
+            func = defn["function"]
+            assert "name" in func
+            assert "description" in func
+            assert "parameters" in func
+            schema = func["parameters"]
             assert schema["type"] == "object"
             assert "properties" in schema
             assert "required" in schema

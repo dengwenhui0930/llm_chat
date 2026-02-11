@@ -19,8 +19,8 @@ def _parse_sse(body: str) -> list[dict]:
 # ---------- 1. test_normal_chat ----------
 
 @pytest.mark.asyncio
-async def test_normal_chat(client, mock_anthropic):
-    setup_normal_chat(mock_anthropic, ["你好", "，", "世界"])
+async def test_normal_chat(client, mock_openai):
+    setup_normal_chat(mock_openai, ["你好", "，", "世界"])
 
     resp = await client.post("/chat", json={
         "session_id": "normal-1",
@@ -44,28 +44,25 @@ async def test_normal_chat(client, mock_anthropic):
 # ---------- 2. test_multi_turn_context ----------
 
 @pytest.mark.asyncio
-async def test_multi_turn_context(client, mock_anthropic):
+async def test_multi_turn_context(client, mock_openai):
     # Round 1
-    setup_normal_chat(mock_anthropic, ["回复1"])
+    setup_normal_chat(mock_openai, ["回复1"])
     await client.post("/chat", json={
         "session_id": "multi-1",
         "message": "第一句话",
     })
 
-    # Round 2 — need fresh stream mock
-    setup_normal_chat(mock_anthropic, ["回复2"])
+    # Round 2
+    setup_normal_chat(mock_openai, ["回复2"])
     await client.post("/chat", json={
         "session_id": "multi-1",
         "message": "第二句话",
     })
 
-    # Verify history
     resp = await client.get("/sessions/multi-1/history")
     assert resp.status_code == 200
 
-    data = resp.json()
-    messages = data["messages"]
-
+    messages = resp.json()["messages"]
     assert len(messages) == 4
     assert messages[0] == {"role": "user", "content": "第一句话"}
     assert messages[1] == {"role": "assistant", "content": "回复1"}
@@ -76,9 +73,9 @@ async def test_multi_turn_context(client, mock_anthropic):
 # ---------- 3. test_tool_use ----------
 
 @pytest.mark.asyncio
-async def test_tool_use(client, mock_anthropic):
+async def test_tool_use(client, mock_openai):
     setup_tool_use_chat(
-        mock_anthropic,
+        mock_openai,
         tool_id="call_weather_1",
         tool_name="get_weather",
         tool_input={"city": "北京"},
@@ -96,19 +93,17 @@ async def test_tool_use(client, mock_anthropic):
     full_text = "".join(d["text"] for d in deltas)
     assert "22°C" in full_text
 
-    # Verify tool_use and tool_result are in history
     hist_resp = await client.get("/sessions/tool-1/history")
     messages = hist_resp.json()["messages"]
 
-    # user -> assistant(tool_use) -> user(tool_result) -> assistant(final)
+    # user -> assistant(tool_calls) -> tool(result) -> assistant(final)
     assert messages[0]["role"] == "user"
     assert messages[1]["role"] == "assistant"
-    assert any(b["type"] == "tool_use" for b in messages[1]["content"])
-    assert messages[2]["role"] == "user"
-    assert messages[2]["content"][0]["type"] == "tool_result"
-    assert messages[2]["content"][0]["tool_use_id"] == "call_weather_1"
-    # tool_result content should contain weather data
-    tool_result_data = json.loads(messages[2]["content"][0]["content"])
+    assert "tool_calls" in messages[1]
+    assert messages[1]["tool_calls"][0]["id"] == "call_weather_1"
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == "call_weather_1"
+    tool_result_data = json.loads(messages[2]["content"])
     assert tool_result_data["city"] == "北京"
     assert messages[3]["role"] == "assistant"
 
@@ -116,8 +111,7 @@ async def test_tool_use(client, mock_anthropic):
 # ---------- 4. test_rag_retrieval ----------
 
 @pytest.mark.asyncio
-async def test_rag_retrieval(client, mock_anthropic):
-    # Upload a test document
+async def test_rag_retrieval(client, mock_openai):
     file_content = "本产品支持智能问答、文档检索和自动摘要三大核心功能。"
     upload_resp = await client.post(
         "/knowledge/upload",
@@ -126,17 +120,17 @@ async def test_rag_retrieval(client, mock_anthropic):
     assert upload_resp.status_code == 200
     assert upload_resp.json()["status"] == "success"
 
-    # Capture the system prompt passed to Claude API
-    captured_system = {}
+    captured_messages = {}
 
     async def capture_create(**kwargs):
-        captured_system["value"] = kwargs.get("system", "")
-        from tests.conftest import _make_text_block, _make_response
-        return _make_response([_make_text_block("基于知识库回答")], "end_turn")
+        captured_messages["value"] = kwargs.get("messages", [])
+        if kwargs.get("stream"):
+            from tests.conftest import _make_stream_chunks
+            return _make_stream_chunks(["基于知识库的回答"])
+        from tests.conftest import _make_response
+        return _make_response(content="基于知识库回答")
 
-    mock_anthropic.messages.create = capture_create
-    from tests.conftest import _make_stream_ctx
-    mock_anthropic.messages.stream = lambda **kwargs: _make_stream_ctx(["基于知识库的回答"])
+    mock_openai.chat.completions.create = capture_create
 
     resp = await client.post("/chat", json={
         "session_id": "rag-1",
@@ -145,37 +139,34 @@ async def test_rag_retrieval(client, mock_anthropic):
     })
     assert resp.status_code == 200
 
-    # Verify knowledge was injected into system prompt
-    system_prompt = captured_system["value"]
-    assert "智能问答" in system_prompt or "文档检索" in system_prompt or "自动摘要" in system_prompt
+    system_msg = captured_messages["value"][0]
+    assert system_msg["role"] == "system"
+    assert "智能问答" in system_msg["content"] or "文档检索" in system_msg["content"] or "自动摘要" in system_msg["content"]
 
 
 # ---------- 5. test_error_handling ----------
 
 @pytest.mark.asyncio
-async def test_error_session_not_found(client, mock_anthropic):
+async def test_error_session_not_found(client, mock_openai):
     resp = await client.get("/sessions/nonexistent-session/history")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Session not found"
 
 
 @pytest.mark.asyncio
-async def test_error_delete_not_found(client, mock_anthropic):
+async def test_error_delete_not_found(client, mock_openai):
     resp = await client.delete("/sessions/nonexistent-session")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Session not found"
 
 
 @pytest.mark.asyncio
-async def test_error_missing_fields(client, mock_anthropic):
-    # Missing session_id and message
+async def test_error_missing_fields(client, mock_openai):
     resp = await client.post("/chat", json={})
     assert resp.status_code == 422
 
-    # Missing message
     resp = await client.post("/chat", json={"session_id": "x"})
     assert resp.status_code == 422
 
-    # Missing session_id
     resp = await client.post("/chat", json={"message": "hi"})
     assert resp.status_code == 422
