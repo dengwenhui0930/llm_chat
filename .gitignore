@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.env
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# UI/App temporary files
+ui/uploads/
+ui/static/qr_codes/
+agent/test_qr.py
+agent/test_automation.py
+
+# MCP Server temporary files
+external_xhs_mcp/cookies.json
+cookies.json
+mcp_output_*.png
+
+# Node/Frontend (if any)
+node_modules/
+dist/
+.next/
+browser_data/
+crawl_data
