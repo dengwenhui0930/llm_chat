@@ -13,7 +13,7 @@ from app.services.prompt_manager import load_template, render_template
 from app.services.retriever import retrieve
 from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI, dispatch
 
-_MODEL = os.environ.get("CHAT_MODEL", "anthropic/claude-sonnet-4-20250514")
+_MODEL = os.environ.get("CHAT_MODEL", "anthropic/claude-sonnet-4")
 _MAX_TOKENS = 4096
 
 # In-memory session storage: session_id -> list of messages
