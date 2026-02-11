@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse
 from app.models.chat import ChatRequest
 from app.services.chat_service import ChatService, _sessions
 from app.services.knowledge_service import ALLOWED_EXTENSIONS, split_chunks, store_chunks
+from app.services.prompt_manager import get_current_version, list_versions, load_template
 from app.tools.tool_registry import TOOL_DEFINITIONS
 
 router = APIRouter()
@@ -59,6 +60,16 @@ async def list_tools():
             "parameters": parameters,
         })
     return {"tools": tools}
+
+
+@router.get("/prompts")
+async def list_prompts():
+    current = get_current_version()
+    return {
+        "current_version": current,
+        "available_versions": list_versions(),
+        "current_template": load_template(current),
+    }
 
 
 @router.post("/knowledge/upload")

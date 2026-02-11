@@ -1,16 +1,12 @@
 import json
 import os
-from pathlib import Path
 from collections.abc import AsyncGenerator
 
 import anthropic
 
+from app.services.prompt_manager import load_template, render_template
 from app.services.retriever import retrieve
 from app.tools.tool_registry import TOOL_DEFINITIONS, dispatch
-
-_PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
-_DEFAULT_SYSTEM_PROMPT_PATH = _PROMPTS_DIR / "chat_system.md"
-_RAG_SYSTEM_PROMPT_PATH = _PROMPTS_DIR / "rag_system.md"
 
 _MODEL = "claude-sonnet-4-20250514"
 _MAX_TOKENS = 4096
@@ -19,29 +15,28 @@ _MAX_TOKENS = 4096
 _sessions: dict[str, list[dict]] = {}
 
 
-def _load_prompt(path: Path, fallback: str) -> str:
-    if path.exists():
-        return path.read_text(encoding="utf-8").strip()
-    return fallback
-
-
 class ChatService:
     def __init__(self) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is required")
         self.client = anthropic.AsyncAnthropic(api_key=api_key)
-        self.system_prompt = _load_prompt(_DEFAULT_SYSTEM_PROMPT_PATH, "You are a helpful assistant.")
-        self.rag_prompt_template = _load_prompt(_RAG_SYSTEM_PROMPT_PATH, "你是一个智能助手。请基于以下参考资料回答用户的问题。\n\n【参考资料】\n{references}\n\n如果参考资料中没有相关信息，请据实说明。")
 
     def _build_system_prompt(self, message: str, use_knowledge: bool) -> str:
-        if not use_knowledge:
-            return self.system_prompt
-        chunks = retrieve(message)
-        if not chunks:
-            return self.system_prompt
-        references = "\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(chunks))
-        return self.rag_prompt_template.replace("{references}", references)
+        variables: dict[str, str] = {}
+
+        if use_knowledge:
+            chunks = retrieve(message)
+            if chunks:
+                references = "\n".join(f"[{i+1}] {chunk}" for i, chunk in enumerate(chunks))
+                variables["knowledge_context"] = references
+
+        tool_names = [t["name"] for t in TOOL_DEFINITIONS]
+        if tool_names:
+            variables["tool_list"] = ", ".join(tool_names)
+
+        template = load_template()
+        return render_template(template, variables)
 
     async def chat_stream(
         self,
@@ -69,8 +64,6 @@ class ChatService:
                 )
 
                 if response.stop_reason != "tool_use":
-                    # No tool call — discard this non-streamed response,
-                    # we'll re-request with streaming below.
                     break
 
                 # Append the full assistant message (may contain text + tool_use blocks)
@@ -103,8 +96,6 @@ class ChatService:
                     yield f"data: {json.dumps({'type': 'content_block_delta', 'text': text}, ensure_ascii=False)}\n\n"
 
         except (anthropic.AuthenticationError, anthropic.APITimeoutError, anthropic.APIError):
-            # Roll back: remove the user message we appended
-            # Also remove any intermediate tool-loop messages from this turn
             while history and history[-1].get("role") != "user":
                 history.pop()
             if history:
