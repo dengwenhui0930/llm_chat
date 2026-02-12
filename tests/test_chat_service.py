@@ -142,3 +142,64 @@ def test_chat_request_model():
     req = ChatRequest(session_id="abc", message="hello")
     assert req.session_id == "abc"
     assert req.message == "hello"
+
+
+# --- Tool execution error handling ---
+
+@pytest.mark.asyncio
+async def test_tool_execution_with_invalid_json(chat_service):
+    """Tool call with malformed arguments should not crash the stream."""
+    from app.services.chat_service import _sessions
+
+    tc = MagicMock()
+    tc.id = "call_bad"
+    tc.type = "function"
+    tc.function = MagicMock()
+    tc.function.name = "get_weather"
+    tc.function.arguments = "not valid json{{"
+
+    tool_response = _make_response(
+        content="",
+        tool_calls=[tc],
+    )
+    final_response = _make_response(content="抱歉，工具调用失败")
+
+    chat_service.client.chat.completions.create = AsyncMock(
+        side_effect=[tool_response, final_response]
+    )
+
+    chunks = []
+    async for chunk in chat_service.chat_stream("s-bad-json", "test"):
+        chunks.append(chunk)
+
+    assert len(chunks) == 2
+    history = _sessions["s-bad-json"]
+    tool_msg = [m for m in history if m.get("role") == "tool"]
+    assert len(tool_msg) == 1
+    result = json.loads(tool_msg[0]["content"])
+    assert "error" in result
+
+
+# --- Error recovery preserves user message ---
+
+@pytest.mark.asyncio
+async def test_error_recovery_keeps_user_message(chat_service):
+    """On API error, user message should be preserved in history."""
+    from app.services.chat_service import _sessions
+    from openai import APIError
+
+    chat_service.client.chat.completions.create = AsyncMock(
+        side_effect=APIError(
+            message="Server error",
+            request=MagicMock(),
+            body=None,
+        )
+    )
+
+    with pytest.raises(APIError):
+        async for _ in chat_service.chat_stream("s-err", "my question"):
+            pass
+
+    history = _sessions["s-err"]
+    assert len(history) == 1
+    assert history[0] == {"role": "user", "content": "my question"}

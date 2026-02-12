@@ -84,7 +84,10 @@ async def upload_knowledge(file: UploadFile):
     if ext == ".docx":
         content = extract_docx_text(raw)
     else:
-        content = raw.decode("utf-8")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="File encoding error: only UTF-8 is supported")
     chunks = split_chunks(content)
     store_chunks(file.filename, chunks)
     return {"filename": file.filename, "chunks": len(chunks), "status": "success"}

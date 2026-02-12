@@ -165,3 +165,70 @@ async def test_error_missing_fields(client, mock_openai):
 
     resp = await client.post("/chat", json={"message": "hi"})
     assert resp.status_code == 422
+
+
+# ---------- 6. test_health_endpoint ----------
+
+@pytest.mark.asyncio
+async def test_health_endpoint(client, mock_openai):
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["service"] == "llm-chat"
+
+
+# ---------- 7. test_tools_endpoint ----------
+
+@pytest.mark.asyncio
+async def test_tools_endpoint(client, mock_openai):
+    resp = await client.get("/tools")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "tools" in data
+    assert len(data["tools"]) >= 2
+    names = [t["name"] for t in data["tools"]]
+    assert "get_weather" in names
+    assert "calculator" in names
+
+
+# ---------- 8. test_settings_endpoints ----------
+
+@pytest.mark.asyncio
+async def test_get_settings(client, mock_openai):
+    resp = await client.get("/settings")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "chat_model" in data
+    assert "prompt_version" in data
+    assert "available_prompt_versions" in data
+
+
+@pytest.mark.asyncio
+async def test_update_settings_invalid_prompt(client, mock_openai):
+    resp = await client.put("/settings", json={"prompt_version": "v99_nonexistent"})
+    assert resp.status_code == 400
+    assert "Unknown prompt version" in resp.json()["detail"]
+
+
+# ---------- 9. test_upload_encoding_error ----------
+
+@pytest.mark.asyncio
+async def test_upload_non_utf8_file(client, mock_openai):
+    # GBK-encoded content that is not valid UTF-8
+    gbk_bytes = "中文内容".encode("gbk")
+    resp = await client.post(
+        "/knowledge/upload",
+        files={"file": ("test.txt", io.BytesIO(gbk_bytes), "text/plain")},
+    )
+    assert resp.status_code == 400
+    assert "UTF-8" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_upload_unsupported_type(client, mock_openai):
+    resp = await client.post(
+        "/knowledge/upload",
+        files={"file": ("test.exe", io.BytesIO(b"data"), "application/octet-stream")},
+    )
+    assert resp.status_code == 400

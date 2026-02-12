@@ -143,8 +143,11 @@ class ChatService:
 
                 # Execute each tool and append tool results
                 for tc in assistant_msg.tool_calls:
-                    tool_input = json.loads(tc.function.arguments)
-                    result = dispatch(tc.function.name, tool_input)
+                    try:
+                        tool_input = json.loads(tc.function.arguments)
+                        result = dispatch(tc.function.name, tool_input)
+                    except (json.JSONDecodeError, TypeError, Exception) as e:
+                        result = {"error": f"Tool execution failed: {e}"}
                     history.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -156,10 +159,8 @@ class ChatService:
             yield f"data: {json.dumps({'type': 'content_block_delta', 'text': full_response}, ensure_ascii=False)}\n\n"
 
         except (AuthenticationError, APITimeoutError, APIError):
-            # Roll back all messages added in this turn
+            # Roll back assistant/tool messages but keep the user message
             while history and history[-1].get("role") != "user":
-                history.pop()
-            if history:
                 history.pop()
             raise
 
