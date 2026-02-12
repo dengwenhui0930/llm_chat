@@ -34,10 +34,8 @@ async def test_normal_chat(client, mock_openai):
     deltas = [e for e in events if e["type"] == "content_block_delta"]
     stop = [e for e in events if e["type"] == "message_stop"]
 
-    assert len(deltas) == 3
-    assert deltas[0]["text"] == "你好"
-    assert deltas[1]["text"] == "，"
-    assert deltas[2]["text"] == "世界"
+    assert len(deltas) == 1
+    assert deltas[0]["text"] == "你好，世界"
     assert len(stop) == 1
 
 
@@ -124,9 +122,6 @@ async def test_rag_retrieval(client, mock_openai):
 
     async def capture_create(**kwargs):
         captured_messages["value"] = kwargs.get("messages", [])
-        if kwargs.get("stream"):
-            from tests.conftest import _make_stream_chunks
-            return _make_stream_chunks(["基于知识库的回答"])
         from tests.conftest import _make_response
         return _make_response(content="基于知识库回答")
 

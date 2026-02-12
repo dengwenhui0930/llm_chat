@@ -1,5 +1,9 @@
+import os
+from unittest.mock import patch, MagicMock
+
 from app.tools.get_weather import get_weather
 from app.tools.calculator import calculator
+from app.tools.web_search import web_search
 from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI, dispatch
 
 
@@ -40,6 +44,75 @@ class TestCalculator:
     def test_invalid_expression(self):
         result = calculator("abc")
         assert "error" in result
+
+
+class TestWebSearch:
+    def test_missing_api_key(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BAIDU_SEARCH_API_KEY", None)
+            result = web_search("test query")
+            assert result["query"] == "test query"
+            assert "error" in result
+            assert "not configured" in result["error"]
+
+    def test_successful_search(self):
+        mock_message = MagicMock()
+        mock_message.content = "搜索结果摘要"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+        mock_resp.search_results = None
+
+        with patch.dict(os.environ, {"BAIDU_SEARCH_API_KEY": "test-key"}):
+            with patch("app.tools.web_search.OpenAI") as mock_cls:
+                mock_cls.return_value.chat.completions.create.return_value = mock_resp
+                result = web_search("Python 最新版本")
+
+        assert result["query"] == "Python 最新版本"
+        assert result["answer"] == "搜索结果摘要"
+        assert result["results"] == []
+
+    def test_api_error_handling(self):
+        from openai import APIError
+
+        with patch.dict(os.environ, {"BAIDU_SEARCH_API_KEY": "test-key"}):
+            with patch("app.tools.web_search.OpenAI") as mock_cls:
+                mock_cls.return_value.chat.completions.create.side_effect = APIError(
+                    message="Service unavailable",
+                    request=MagicMock(),
+                    body=None,
+                )
+                result = web_search("test")
+
+        assert result["query"] == "test"
+        assert "error" in result
+
+    def test_max_results_parameter(self):
+        mock_message = MagicMock()
+        mock_message.content = "结果"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_resp = MagicMock()
+        mock_resp.choices = [mock_choice]
+
+        # Simulate search_results attribute
+        mock_results = []
+        for i in range(5):
+            r = MagicMock()
+            r.title = f"Title {i}"
+            r.url = f"https://example.com/{i}"
+            r.snippet = f"Snippet {i}"
+            mock_results.append(r)
+        mock_resp.search_results = mock_results
+
+        with patch.dict(os.environ, {"BAIDU_SEARCH_API_KEY": "test-key"}):
+            with patch("app.tools.web_search.OpenAI") as mock_cls:
+                mock_cls.return_value.chat.completions.create.return_value = mock_resp
+                result = web_search("test", max_results=3)
+
+        assert len(result["results"]) == 3
+        assert result["results"][0]["title"] == "Title 0"
 
 
 class TestToolRegistry:

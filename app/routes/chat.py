@@ -2,14 +2,13 @@ import os
 
 from fastapi import APIRouter, HTTPException, Response, UploadFile
 from fastapi.responses import StreamingResponse
-
-from app.models.chat import ChatRequest
-from app.services.chat_service import ChatService, _sessions
 from pydantic import BaseModel
 
+from app.models.chat import ChatRequest
+from app.services.chat_service import ChatService, get_session, remove_session, get_model, set_model
 from app.services.knowledge_service import ALLOWED_EXTENSIONS, delete_file, extract_docx_text, list_files, split_chunks, store_chunks
 from app.services.prompt_manager import get_current_version, list_versions, load_template
-from app.tools.tool_registry import TOOL_DEFINITIONS
+from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI
 
 router = APIRouter()
 
@@ -41,15 +40,16 @@ async def chat(request: ChatRequest):
 
 @router.get("/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
-    if session_id not in _sessions:
+    messages = get_session(session_id)
+    if messages is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return {"session_id": session_id, "messages": _sessions[session_id]}
+    return {"session_id": session_id, "messages": messages}
 
 
 @router.get("/tools")
 async def list_tools():
     tools = []
-    for defn in TOOL_DEFINITIONS:
+    for defn in TOOL_DEFINITIONS_OPENAI:
         func = defn["function"]
         schema = func["parameters"]
         required = set(schema.get("required", []))
@@ -92,9 +92,9 @@ async def upload_knowledge(file: UploadFile):
 
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(session_id: str):
-    if session_id not in _sessions:
+    if not remove_session(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
-    del _sessions[session_id]
+    return Response(status_code=204)
 
 
 # ---------- Knowledge Files ----------
@@ -117,11 +117,11 @@ class SettingsUpdate(BaseModel):
     chat_model: str | None = None
     prompt_version: str | None = None
 
+
 @router.get("/settings")
 async def get_settings():
-    from app.services.chat_service import _MODEL
     return {
-        "chat_model": _MODEL,
+        "chat_model": get_model(),
         "prompt_version": get_current_version(),
         "available_prompt_versions": list_versions(),
     }
@@ -129,10 +129,9 @@ async def get_settings():
 
 @router.put("/settings")
 async def update_settings(body: SettingsUpdate):
-    import app.services.chat_service as cs
     updated = {}
     if body.chat_model is not None:
-        cs._MODEL = body.chat_model
+        set_model(body.chat_model)
         updated["chat_model"] = body.chat_model
     if body.prompt_version is not None:
         versions = list_versions()

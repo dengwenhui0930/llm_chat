@@ -2,7 +2,7 @@
 
 import os
 
-from openai import OpenAI
+from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
 
 
 def web_search(query: str, max_results: int = 5) -> dict:
@@ -37,5 +37,5 @@ def web_search(query: str, max_results: int = 5) -> dict:
             "answer": answer,
             "results": results,
         }
-    except Exception as e:
+    except (APIError, APIConnectionError, APITimeoutError, ValueError) as e:
         return {"query": query, "error": str(e)}

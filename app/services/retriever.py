@@ -2,32 +2,36 @@ import math
 
 import jieba
 
-from app.services.knowledge_service import _knowledge_store
+from app.services.knowledge_service import get_all_chunks, is_idf_dirty, mark_idf_clean
 
 TOP_K = 3
+
+# IDF and tokenization cache — rebuilt only when knowledge store changes
+_idf_cache: dict[str, float] | None = None
+_tokens_cache: list[list[str]] | None = None
 
 
 def _tokenize(text: str) -> list[str]:
     return [w for w in jieba.cut(text) if w.strip()]
 
 
-def _build_idf(all_chunks: list[str]) -> dict[str, float]:
-    """Calculate IDF for each term across all chunks."""
-    n = len(all_chunks)
-    df: dict[str, int] = {}
-    for chunk in all_chunks:
-        seen = set(_tokenize(chunk))
-        for word in seen:
-            df[word] = df.get(word, 0) + 1
-    return {word: math.log((n + 1) / (count + 1)) + 1 for word, count in df.items()}
+def _ensure_cache(all_chunks: list[str]) -> tuple[dict[str, float], list[list[str]]]:
+    global _idf_cache, _tokens_cache
+    if _idf_cache is None or is_idf_dirty():
+        _tokens_cache = [_tokenize(chunk) for chunk in all_chunks]
+        n = len(all_chunks)
+        df: dict[str, int] = {}
+        for tokens in _tokens_cache:
+            for word in set(tokens):
+                df[word] = df.get(word, 0) + 1
+        _idf_cache = {word: math.log((n + 1) / (count + 1)) + 1 for word, count in df.items()}
+        mark_idf_clean()
+    return _idf_cache, _tokens_cache
 
 
-def _tfidf_score(query_tokens: list[str], chunk: str, idf: dict[str, float]) -> float:
-    """Score a chunk against query tokens using TF-IDF."""
-    chunk_tokens = _tokenize(chunk)
+def _tfidf_score(query_tokens: list[str], chunk_tokens: list[str], idf: dict[str, float]) -> float:
     if not chunk_tokens:
         return 0.0
-    # Term frequency in chunk
     tf: dict[str, float] = {}
     for token in chunk_tokens:
         tf[token] = tf.get(token, 0) + 1
@@ -40,12 +44,7 @@ def _tfidf_score(query_tokens: list[str], chunk: str, idf: dict[str, float]) -> 
 
 
 def retrieve(query: str, top_k: int = TOP_K) -> list[str]:
-    """Retrieve top-k most relevant chunks from all uploaded knowledge."""
-    # Gather all chunks
-    all_chunks: list[str] = []
-    for chunks in _knowledge_store.values():
-        all_chunks.extend(chunks)
-
+    all_chunks = get_all_chunks()
     if not all_chunks:
         return []
 
@@ -53,9 +52,12 @@ def retrieve(query: str, top_k: int = TOP_K) -> list[str]:
     if not query_tokens:
         return []
 
-    idf = _build_idf(all_chunks)
+    idf, tokens_cache = _ensure_cache(all_chunks)
 
-    scored = [(chunk, _tfidf_score(query_tokens, chunk, idf)) for chunk in all_chunks]
+    scored = [
+        (chunk, _tfidf_score(query_tokens, tokens_cache[i], idf))
+        for i, chunk in enumerate(all_chunks)
+    ]
     scored.sort(key=lambda x: x[1], reverse=True)
 
     return [chunk for chunk, score in scored[:top_k] if score > 0]

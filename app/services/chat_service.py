@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from collections.abc import AsyncGenerator
 
 from openai import (
@@ -16,8 +17,50 @@ from app.tools.tool_registry import TOOL_DEFINITIONS_OPENAI, dispatch
 _MODEL = os.environ.get("CHAT_MODEL", "anthropic/claude-sonnet-4")
 _MAX_TOKENS = 4096
 
+_SESSION_MAX_COUNT = 1000
+_SESSION_TTL_SECONDS = 3600  # 1 hour
+
 # In-memory session storage: session_id -> list of messages
 _sessions: dict[str, list[dict]] = {}
+_session_last_active: dict[str, float] = {}
+
+
+# --------------- Session accessor functions ---------------
+
+def get_session(session_id: str) -> list[dict] | None:
+    return _sessions.get(session_id)
+
+
+def remove_session(session_id: str) -> bool:
+    removed = _sessions.pop(session_id, None) is not None
+    _session_last_active.pop(session_id, None)
+    return removed
+
+
+def get_model() -> str:
+    return _MODEL
+
+
+def set_model(model: str) -> None:
+    global _MODEL
+    _MODEL = model
+
+
+def _cleanup_expired_sessions() -> None:
+    now = time.time()
+    expired = [
+        sid for sid, ts in _session_last_active.items()
+        if now - ts > _SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        _sessions.pop(sid, None)
+        _session_last_active.pop(sid, None)
+
+    if len(_sessions) > _SESSION_MAX_COUNT:
+        sorted_by_time = sorted(_session_last_active.items(), key=lambda x: x[1])
+        for sid, _ in sorted_by_time[: len(_sessions) - _SESSION_MAX_COUNT]:
+            _sessions.pop(sid, None)
+            _session_last_active.pop(sid, None)
 
 
 class ChatService:
@@ -50,8 +93,11 @@ class ChatService:
         message: str,
         use_knowledge: bool = False,
     ) -> AsyncGenerator[str, None]:
+        _cleanup_expired_sessions()
+
         if session_id not in _sessions:
             _sessions[session_id] = []
+        _session_last_active[session_id] = time.time()
         history = _sessions[session_id]
 
         system_prompt = self._build_system_prompt(message, use_knowledge)
@@ -105,21 +151,9 @@ class ChatService:
                         "content": json.dumps(result, ensure_ascii=False),
                     })
 
-            # Final streaming call
-            full_response = ""
-            stream = await self.client.chat.completions.create(
-                model=_MODEL,
-                max_tokens=_MAX_TOKENS,
-                messages=_build_messages(),
-                tools=TOOL_DEFINITIONS_OPENAI,
-                stream=True,
-            )
-
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if delta and delta.content:
-                    full_response += delta.content
-                    yield f"data: {json.dumps({'type': 'content_block_delta', 'text': delta.content}, ensure_ascii=False)}\n\n"
+            # Use the non-streaming response directly — no redundant second API call
+            full_response = assistant_msg.content or ""
+            yield f"data: {json.dumps({'type': 'content_block_delta', 'text': full_response}, ensure_ascii=False)}\n\n"
 
         except (AuthenticationError, APITimeoutError, APIError):
             # Roll back all messages added in this turn

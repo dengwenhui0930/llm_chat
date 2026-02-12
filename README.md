@@ -1,12 +1,12 @@
 # LLM Chat Service
 
-基于 Claude API 的多轮对话后端服务，支持 **Tool Use**（工具调用）和 **RAG**（检索增强生成）。
+基于 OpenAI 兼容 API（通过 OpenRouter）的多轮对话后端服务，支持 **Tool Use**（工具调用）和 **RAG**（检索增强生成）。
 
 ## 技术栈
 
 - **Python 3.11+**
 - **FastAPI** — 异步 Web 框架
-- **Anthropic SDK** — Claude API 官方 Python 客户端
+- **OpenAI SDK** — 通过 OpenRouter 调用 Claude 等模型
 - **jieba** — 中文分词，用于 RAG 检索
 - **uvicorn** — ASGI 服务器
 
@@ -21,14 +21,16 @@ pip install -r requirements.txt
 ### 2. 配置环境变量
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-xxxxx
+export OPENROUTER_API_KEY=sk-or-v1-xxxxx
 ```
 
 或在项目根目录创建 `.env` 文件：
 
 ```
-ANTHROPIC_API_KEY=sk-ant-xxxxx
-PROMPT_VERSION=v1_default        # 可选，默认 v1_default
+OPENROUTER_API_KEY=sk-or-v1-xxxxx
+CHAT_MODEL=anthropic/claude-sonnet-4    # 可选，默认 anthropic/claude-sonnet-4
+PROMPT_VERSION=v1_default               # 可选，默认 v1_default
+BAIDU_SEARCH_API_KEY=xxx                # 可选，联网搜索功能
 ```
 
 ### 3. 启动服务
@@ -71,29 +73,29 @@ pytest -v
                             |
                             v
                   +-------------------+
-                  |   Claude API      |
-                  |   (streaming)     |
+                  | OpenRouter API    |
+                  | (OpenAI compat)   |
                   +--------+----------+
                            |
-              stop_reason == "tool_use" ?
+                  tool_calls present?
                     /            \
                   yes             no
                   /                \
            +-----------+      +----------+
            | Tool Use  |      | 直接返回  |
-           | dispatch  |      | SSE 流   |
+           | dispatch  |      | SSE 响应  |
            +-----------+      +----------+
                 |
                 v
            执行工具函数
-           (天气/计算器)
+           (天气/计算器/搜索)
                 |
                 v
           tool_result 回传
-          Claude API 继续
+          继续 API 调用
                 |
                 v
-           最终 SSE 流返回
+           最终 SSE 返回
 ```
 
 ## API 接口文档
@@ -113,9 +115,7 @@ pytest -v
 
 **响应（SSE）：**
 ```
-data: {"type": "content_block_delta", "text": "北京"}
-data: {"type": "content_block_delta", "text": "今天"}
-data: {"type": "content_block_delta", "text": "晴朗"}
+data: {"type": "content_block_delta", "text": "北京今天22°C，天气晴朗。"}
 data: {"type": "message_stop"}
 ```
 
@@ -167,6 +167,11 @@ data: {"type": "message_stop"}
       "name": "calculator",
       "description": "数学计算器，支持加减乘除和括号运算",
       "parameters": {"expression": {"type": "string", "required": true}}
+    },
+    {
+      "name": "web_search",
+      "description": "联网搜索，获取实时网络信息",
+      "parameters": {"query": {"type": "string", "required": true}}
     }
   ]
 }
@@ -176,7 +181,7 @@ data: {"type": "message_stop"}
 
 ### POST /knowledge/upload
 
-上传知识文件（.txt / .md），用于 RAG 检索。
+上传知识文件（.txt / .md / .docx），用于 RAG 检索。
 
 **请求：** `multipart/form-data`，字段名 `file`
 
@@ -194,7 +199,59 @@ curl -X POST http://localhost:8000/knowledge/upload \
 }
 ```
 
-**错误：** `400` — 文件格式不是 .txt 或 .md
+**错误：** `400` — 文件格式不是 .txt、.md 或 .docx
+
+---
+
+### GET /knowledge/files
+
+返回已上传的知识文件列表。
+
+**响应：**
+```json
+{
+  "files": [
+    {"filename": "产品手册.txt", "chunks": 12}
+  ]
+}
+```
+
+---
+
+### DELETE /knowledge/files/{filename}
+
+删除指定知识文件。
+
+**错误：** `404` — `{"detail": "File not found"}`
+
+---
+
+### GET /settings
+
+查看当前设置。
+
+**响应：**
+```json
+{
+  "chat_model": "anthropic/claude-sonnet-4",
+  "prompt_version": "v1_default",
+  "available_prompt_versions": ["v1_default", "v2_professional"]
+}
+```
+
+---
+
+### PUT /settings
+
+修改模型或 Prompt 模板版本。
+
+**请求：**
+```json
+{
+  "chat_model": "anthropic/claude-sonnet-4",
+  "prompt_version": "v2_professional"
+}
+```
 
 ---
 
@@ -234,27 +291,26 @@ llm-chat/
 │   ├── routes/
 │   │   └── chat.py              # API 路由定义
 │   ├── services/
-│   │   ├── chat_service.py      # Claude API 调用，Tool Use 循环，会话管理
-│   │   ├── knowledge_service.py # 知识文件分块与存储
+│   │   ├── chat_service.py      # OpenAI API 调用，Tool Use 循环，会话管理（TTL）
+│   │   ├── knowledge_service.py # 知识文件分块与存储，IDF 缓存标记
 │   │   ├── prompt_manager.py    # Prompt 模板加载、条件渲染、版本管理
-│   │   └── retriever.py         # jieba 分词 + TF-IDF 检索
+│   │   └── retriever.py         # jieba 分词 + TF-IDF 检索（带缓存）
 │   └── tools/
 │       ├── calculator.py        # 安全数学计算器（ast 解析）
 │       ├── get_weather.py       # 天气查询（mock 数据）
+│       ├── web_search.py        # 联网搜索（百度 AI Search）
 │       └── tool_registry.py     # 工具注册、JSON Schema 定义、dispatch
 ├── prompts/
-│   ├── chat_system.md           # 旧版默认 system prompt
-│   ├── rag_system.md            # 旧版 RAG prompt
 │   ├── v1_default.txt           # 模板 v1：通用助手
 │   └── v2_professional.txt      # 模板 v2：企业级专业助手
 ├── tests/
-│   ├── conftest.py              # 共用 fixtures，mock Anthropic client
+│   ├── conftest.py              # 共用 fixtures，mock OpenAI client
 │   ├── test_api.py              # 端到端 API 测试（httpx + FastAPI）
 │   ├── test_chat_service.py     # ChatService 单元测试
 │   ├── test_knowledge.py        # 知识分块测试
 │   ├── test_prompt_manager.py   # 模板渲染测试
 │   ├── test_retriever.py        # 检索测试
-│   └── test_tools.py            # 工具函数测试
+│   └── test_tools.py            # 工具函数测试（含 web_search）
 ├── .env                         # 环境变量（不提交到 git）
 ├── requirements.txt             # Python 依赖
 └── README.md
@@ -264,5 +320,8 @@ llm-chat/
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `ANTHROPIC_API_KEY` | 是 | Claude API 密钥 |
+| `OPENROUTER_API_KEY` | 是 | OpenRouter API 密钥 |
+| `OPENROUTER_BASE_URL` | 否 | API 地址，默认 `https://openrouter.ai/api/v1` |
+| `CHAT_MODEL` | 否 | 模型名称，默认 `anthropic/claude-sonnet-4` |
 | `PROMPT_VERSION` | 否 | Prompt 模板版本，默认 `v1_default` |
+| `BAIDU_SEARCH_API_KEY` | 否 | 百度 AI Search API 密钥，联网搜索用 |

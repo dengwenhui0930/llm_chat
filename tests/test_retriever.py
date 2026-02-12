@@ -1,9 +1,13 @@
-from app.services.knowledge_service import _knowledge_store
+from app.services.knowledge_service import _knowledge_store, clear_all
 from app.services.retriever import retrieve
 
 
 def setup_function():
-    _knowledge_store.clear()
+    clear_all()
+
+
+def teardown_function():
+    clear_all()
 
 
 def test_empty_knowledge_returns_empty():

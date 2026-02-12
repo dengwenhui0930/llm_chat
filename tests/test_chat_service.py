@@ -16,8 +16,9 @@ def mock_env():
 @pytest.fixture
 def chat_service(mock_env):
     with patch("app.services.chat_service.AsyncOpenAI"):
-        from app.services.chat_service import ChatService, _sessions
+        from app.services.chat_service import ChatService, _sessions, _session_last_active
         _sessions.clear()
+        _session_last_active.clear()
         return ChatService()
 
 
@@ -46,38 +47,22 @@ def _make_response(content=None, tool_calls=None):
     return resp
 
 
-async def _make_stream_chunks(chunks):
-    for text in chunks:
-        chunk = MagicMock()
-        delta = MagicMock()
-        delta.content = text
-        choice = MagicMock()
-        choice.delta = delta
-        chunk.choices = [choice]
-        yield chunk
-
-
-# --- No tool use (direct streaming) ---
+# --- No tool use (direct response) ---
 
 @pytest.mark.asyncio
 async def test_chat_stream_no_tool_use(chat_service):
     chat_service.client.chat.completions.create = AsyncMock(
-        side_effect=[
-            _make_response(content="你好"),
-            _make_stream_chunks(["你", "好"]),
-        ]
+        return_value=_make_response(content="你好"),
     )
 
     chunks = []
     async for chunk in chat_service.chat_stream("s1", "Hi"):
         chunks.append(chunk)
 
-    assert len(chunks) == 3
+    assert len(chunks) == 2
     d1 = json.loads(chunks[0].removeprefix("data: ").strip())
-    assert d1 == {"type": "content_block_delta", "text": "你"}
-    d2 = json.loads(chunks[1].removeprefix("data: ").strip())
-    assert d2 == {"type": "content_block_delta", "text": "好"}
-    stop = json.loads(chunks[2].removeprefix("data: ").strip())
+    assert d1 == {"type": "content_block_delta", "text": "你好"}
+    stop = json.loads(chunks[1].removeprefix("data: ").strip())
     assert stop == {"type": "message_stop"}
 
 
@@ -97,7 +82,6 @@ async def test_chat_stream_with_tool_use(chat_service):
         side_effect=[
             tool_response,
             final_response,
-            _make_stream_chunks(["北京", "今天", "晴"]),
         ]
     )
 
@@ -105,7 +89,7 @@ async def test_chat_stream_with_tool_use(chat_service):
     async for chunk in chat_service.chat_stream("s2", "北京天气怎么样"):
         chunks.append(chunk)
 
-    assert len(chunks) == 4
+    assert len(chunks) == 2
 
     history = _sessions["s2"]
     assert history[0] == {"role": "user", "content": "北京天气怎么样"}
@@ -117,7 +101,7 @@ async def test_chat_stream_with_tool_use(chat_service):
     assert history[2]["role"] == "tool"
     assert history[2]["tool_call_id"] == "call_1"
     # final assistant
-    assert history[3] == {"role": "assistant", "content": "北京今天晴"}
+    assert history[3] == {"role": "assistant", "content": "北京今天22°C"}
 
 
 # --- Session history ---
@@ -127,10 +111,7 @@ async def test_session_history_maintained(chat_service):
     from app.services.chat_service import _sessions
 
     chat_service.client.chat.completions.create = AsyncMock(
-        side_effect=[
-            _make_response(content="Hello!"),
-            _make_stream_chunks(["Hello!"]),
-        ]
+        return_value=_make_response(content="Hello!"),
     )
 
     async for _ in chat_service.chat_stream("sess-1", "Hi"):

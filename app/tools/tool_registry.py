@@ -61,9 +61,6 @@ TOOL_DEFINITIONS_OPENAI = [
     },
 ]
 
-# Keep the old name for backward compatibility in /tools route
-TOOL_DEFINITIONS = TOOL_DEFINITIONS_OPENAI
-
 _DISPATCH = {
     "get_weather": get_weather,
     "calculator": calculator,

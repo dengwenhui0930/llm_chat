@@ -36,27 +36,14 @@ def _make_response(content=None, tool_calls=None):
     return resp
 
 
-def _make_stream_chunks(text_chunks: list[str]):
-    """Build an async iterable of stream chunks (OpenAI format)."""
-    async def stream_iter():
-        for text in text_chunks:
-            chunk = MagicMock()
-            delta = MagicMock()
-            delta.content = text
-            choice = MagicMock()
-            choice.delta = delta
-            chunk.choices = [choice]
-            yield chunk
-    return stream_iter()
-
-
 @pytest.fixture()
 def mock_openai():
     """Patch the OpenAI client used by the ChatService singleton."""
     from app.routes import chat as chat_module
-    from app.services.chat_service import _sessions
+    from app.services.chat_service import _sessions, _session_last_active
 
     _sessions.clear()
+    _session_last_active.clear()
 
     if chat_module._service is None:
         with patch("app.services.chat_service.AsyncOpenAI"):
@@ -68,6 +55,7 @@ def mock_openai():
     yield mock_client
 
     _sessions.clear()
+    _session_last_active.clear()
 
 
 @pytest.fixture()
@@ -90,18 +78,10 @@ def make_tool_call():
     return _make_tool_call
 
 
-@pytest.fixture()
-def make_stream_chunks():
-    return _make_stream_chunks
-
-
 def setup_normal_chat(mock_client, text_chunks: list[str]):
     """Configure mock for a normal (no tool use) chat response."""
     mock_client.chat.completions.create = AsyncMock(
-        side_effect=[
-            _make_response(content="".join(text_chunks)),  # non-streaming
-            _make_stream_chunks(text_chunks),               # streaming
-        ]
+        return_value=_make_response(content="".join(text_chunks)),
     )
 
 
@@ -116,7 +96,6 @@ def setup_tool_use_chat(mock_client, tool_id, tool_name, tool_input, final_chunk
     mock_client.chat.completions.create = AsyncMock(
         side_effect=[
             tool_response,      # round 1: tool call
-            final_response,     # round 2: no more tools
-            _make_stream_chunks(final_chunks),  # streaming final
+            final_response,     # round 2: no more tools — used directly
         ]
     )
